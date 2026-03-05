@@ -8,6 +8,24 @@ An AI coding agent with **"infinite memory"** — continuous context across sess
 
 ## Quick Start
 
+### Option A: Ollama (Local — No API Key Needed)
+
+Run Nuum entirely on your machine with [Ollama](https://ollama.com):
+
+```bash
+# 1. Install Ollama: https://ollama.com/download
+# 2. Pull a model
+ollama pull qwen2.5:14b
+
+# 3. Run Nuum
+export AGENT_PROVIDER=ollama
+bunx @sanity-labs/nuum --repl
+```
+
+That's it. No API key, no cloud — fully local AI agent with persistent memory.
+
+### Option B: Anthropic (Cloud)
+
 ```bash
 export ANTHROPIC_API_KEY=your-key-here
 
@@ -17,8 +35,6 @@ bunx @sanity-labs/nuum --repl
 # Or with npx
 npx @sanity-labs/nuum --repl
 ```
-
-That's it. Start chatting. Your agent remembers everything.
 
 ### REPL Commands
 
@@ -232,21 +248,96 @@ Reflection searches the full conversation history (via FTS5 full-text search) an
 
 ## Configuration
 
+### Provider Selection
+
+Nuum supports two LLM providers:
+
+| Provider | `AGENT_PROVIDER` | Requirements |
+|----------|-----------------|--------------|
+| **Anthropic** (default) | `anthropic` or unset | `ANTHROPIC_API_KEY` |
+| **Ollama** (local) | `ollama` | Ollama running locally or on network |
+
+### Anthropic Configuration
+
 ```bash
 # Required
 ANTHROPIC_API_KEY=your-key-here
-
-# Optional — Web Search
-BRAVE_SEARCH_API_KEY=your-key    # Brave Search API (recommended)
-                                  # Get a free key at https://brave.com/search/api/
-                                  # Without this, falls back to DuckDuckGo HTML scraping
-                                  # (unreliable from cloud/container IPs)
 
 # Optional — Model Selection (defaults shown)
 AGENT_MODEL_REASONING=claude-opus-4-6
 AGENT_MODEL_WORKHORSE=claude-sonnet-4-5-20250929
 AGENT_MODEL_FAST=claude-haiku-4-5-20251001
-AGENT_DB=./agent.db
+```
+
+### Ollama Configuration
+
+```bash
+# Required
+AGENT_PROVIDER=ollama
+
+# Optional — Ollama server URL (default shown)
+OLLAMA_BASE_URL=http://localhost:11434/v1
+
+# Optional — Model Selection (defaults shown)
+AGENT_MODEL_REASONING=qwen2.5:32b
+AGENT_MODEL_WORKHORSE=qwen2.5:14b
+AGENT_MODEL_FAST=qwen2.5:7b
+```
+
+> **Note:** Ollama can run on a remote server — just set `OLLAMA_BASE_URL` to point at it (e.g., `http://gpu-server:11434/v1`). On the Ollama host, set `OLLAMA_HOST=0.0.0.0` to accept remote connections.
+
+### Supported Ollama Models
+
+Any model available in Ollama works, but these have been tested and have tuned output token limits:
+
+| Model | Output Tokens | Recommended Tier | Notes |
+|-------|--------------|------------------|-------|
+| `qwen2.5:72b` | 8,192 | reasoning | Best quality, needs 48GB+ VRAM |
+| `qwen2.5:32b` | 8,192 | reasoning | Good balance, needs 24GB+ VRAM |
+| `qwen2.5:14b` | 8,192 | workhorse | Default workhorse, 16GB VRAM |
+| `qwen2.5:7b` | 4,096 | fast | Default fast tier, 8GB VRAM |
+| `qwen2.5:3b` | 4,096 | fast | CPU-viable |
+| `qwen2.5-coder:32b` | 8,192 | reasoning | Code-specialized |
+| `qwen2.5-coder:14b` | 8,192 | workhorse | Code-specialized |
+| `qwen2.5-coder:7b` | 4,096 | fast | Code-specialized |
+| `llama3.1:70b` | 4,096 | reasoning | Meta's flagship |
+| `llama3.1:8b` | 4,096 | workhorse | Lightweight alternative |
+| `llama3.2:3b` | 4,096 | fast | Smallest Llama |
+| `llama3.2:1b` | 2,048 | — | Very limited |
+| `deepseek-r1:32b` | 8,192 | reasoning | Strong reasoning |
+| `deepseek-r1:14b` | 8,192 | workhorse | Good reasoning |
+| `deepseek-r1:7b` | 4,096 | fast | Compact reasoning |
+| `mistral:7b` | 4,096 | fast | Fast and capable |
+| `mistral-small:latest` | 8,192 | workhorse | Mistral's small model |
+| `codestral:latest` | 8,192 | workhorse | Code-focused |
+
+Models not in this list get a default of 16,384 output tokens.
+
+### Context Window Differences
+
+Ollama runs with **reduced token budgets** compared to Anthropic to match local model capabilities:
+
+| Budget | Anthropic | Ollama |
+|--------|-----------|--------|
+| Main agent context | 180,000 | 28,000 |
+| Compaction threshold | 80,000 | 16,000 |
+| Compaction target | 60,000 | 12,000 |
+| Temporal query budget | 512,000 | 28,000 |
+| LTM reflect budget | 180,000 | 28,000 |
+
+This means the memory system compacts more aggressively with Ollama — conversations are distilled sooner, keeping the context window in the sweet spot for smaller models. The three-tier memory architecture (working memory → present state → long-term memory) works the same way regardless of provider.
+
+### Common Configuration
+
+```bash
+# Optional — Web Search (works with both providers)
+BRAVE_SEARCH_API_KEY=your-key    # Brave Search API (recommended)
+                                  # Get a free key at https://brave.com/search/api/
+                                  # Without this, falls back to DuckDuckGo HTML scraping
+                                  # (unreliable from cloud/container IPs)
+
+# Optional — Database
+AGENT_DB=./agent.db              # SQLite database path (default: ./agent.db)
 ```
 
 ---
