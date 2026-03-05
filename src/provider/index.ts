@@ -44,14 +44,15 @@ export namespace Provider {
 
   /**
    * Get an Anthropic API key from environment.
-   * Throws if not found.
+   * Throws if not found. Only called when provider is 'anthropic'.
    */
   function getApiKey(): string {
     const key = process.env.ANTHROPIC_API_KEY
     if (!key) {
       throw new Error(
-        'ANTHROPIC_API_KEY environment variable is required.\n' +
-          'Set it with: export ANTHROPIC_API_KEY=sk-...',
+        'ANTHROPIC_API_KEY environment variable is required when using the Anthropic provider.\n' +
+          'Set it with: export ANTHROPIC_API_KEY=sk-...\n' +
+          'Or switch to Ollama: export AGENT_PROVIDER=ollama',
       )
     }
     return key
@@ -81,8 +82,8 @@ export namespace Provider {
    * We use @ai-sdk/openai to talk to it.
    */
   function createOllamaProvider() {
-    const baseURL =
-      process.env.OLLAMA_BASE_URL || 'http://localhost:11434/v1'
+    const config = Config.get()
+    const baseURL = config.ollamaBaseUrl
 
     log.info('creating Ollama provider', {baseURL})
 
@@ -323,6 +324,66 @@ Please check the tool's parameter schema and try again with correct arguments.`
   }
 
   /**
+   * Wrap a provider call with actionable error messages.
+   *
+   * Catches connection errors and provides user-friendly guidance
+   * specific to the configured provider.
+   */
+  async function withProviderErrorHandling<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await operation()
+    } catch (error) {
+      const config = Config.get()
+      const message = error instanceof Error ? error.message : String(error)
+
+      // Detect connection errors for Ollama
+      if (
+        config.provider === 'ollama' &&
+        (message.includes('ECONNREFUSED') ||
+          message.includes('fetch failed') ||
+          message.includes('network error') ||
+          message.includes('Failed to fetch') ||
+          message.includes('ENOTFOUND') ||
+          message.includes('ETIMEDOUT'))
+      ) {
+        const baseURL = config.ollamaBaseUrl
+        throw new Error(
+          `Ollama not reachable at ${baseURL}\n\n` +
+            `To fix this:\n` +
+            `  1. Make sure Ollama is installed: https://ollama.com/download\n` +
+            `  2. Start the Ollama server: ollama serve\n` +
+            `  3. Pull a model: ollama pull ${config.models.workhorse}\n` +
+            `  4. If Ollama is on a different host, set OLLAMA_BASE_URL\n\n` +
+            `Current config: OLLAMA_BASE_URL=${baseURL}\n` +
+            `Original error: ${message}`,
+        )
+      }
+
+      // Detect model-not-found errors for Ollama
+      if (
+        config.provider === 'ollama' &&
+        (message.includes('model') && message.includes('not found') ||
+          message.includes('404'))
+      ) {
+        const modelId = message.match(/model["']?:?\s*["']?([\w.:/-]+)/)?.[1] || 'unknown'
+        throw new Error(
+          `Ollama model not found: ${modelId}\n\n` +
+            `To fix this:\n` +
+            `  Pull the model: ollama pull ${modelId}\n` +
+            `  Or change the model: export AGENT_MODEL_WORKHORSE=<model-name>\n\n` +
+            `Available models: ollama list\n` +
+            `Original error: ${message}`,
+        )
+      }
+
+      // Re-throw other errors unchanged
+      throw error
+    }
+  }
+
+  /**
    * Generate text without streaming.
    */
   export async function generate(
@@ -342,16 +403,18 @@ Please check the tool's parameter schema and try again with correct arguments.`
       provider: Config.get().provider,
     })
 
-    return generateText({
-      model: options.model,
-      messages,
-      tools: prepareTools(options.tools),
-      maxTokens: options.maxTokens,
-      temperature: options.temperature,
-      abortSignal: options.abortSignal,
-      system,
-      experimental_repairToolCall: createToolCallRepairFunction(),
-    })
+    return withProviderErrorHandling(() =>
+      generateText({
+        model: options.model,
+        messages,
+        tools: prepareTools(options.tools),
+        maxTokens: options.maxTokens,
+        temperature: options.temperature,
+        abortSignal: options.abortSignal,
+        system,
+        experimental_repairToolCall: createToolCallRepairFunction(),
+      }),
+    )
   }
 
   /**
@@ -374,16 +437,18 @@ Please check the tool's parameter schema and try again with correct arguments.`
       provider: Config.get().provider,
     })
 
-    return streamText({
-      model: options.model,
-      messages,
-      tools: prepareTools(options.tools),
-      maxTokens: options.maxTokens,
-      temperature: options.temperature,
-      abortSignal: options.abortSignal,
-      system,
-      experimental_repairToolCall: createToolCallRepairFunction(),
-    })
+    return withProviderErrorHandling(() =>
+      streamText({
+        model: options.model,
+        messages,
+        tools: prepareTools(options.tools),
+        maxTokens: options.maxTokens,
+        temperature: options.temperature,
+        abortSignal: options.abortSignal,
+        system,
+        experimental_repairToolCall: createToolCallRepairFunction(),
+      }),
+    )
   }
 
   /**
