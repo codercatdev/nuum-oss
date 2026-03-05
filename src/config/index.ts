@@ -18,9 +18,15 @@ export namespace Config {
   export type ModelTier = 'reasoning' | 'workhorse' | 'fast'
 
   /**
+   * Supported provider identifiers.
+   */
+  export const SUPPORTED_PROVIDERS = ['anthropic', 'ollama'] as const
+  export type ProviderType = (typeof SUPPORTED_PROVIDERS)[number]
+
+  /**
    * Default models per provider.
    */
-  const PROVIDER_MODEL_DEFAULTS: Record<string, Record<ModelTier, string>> = {
+  const PROVIDER_MODEL_DEFAULTS: Record<ProviderType, Record<ModelTier, string>> = {
     anthropic: {
       reasoning: 'claude-opus-4-6',
       workhorse: 'claude-sonnet-4-5-20250929',
@@ -39,7 +45,7 @@ export namespace Config {
    * Anthropic models support 200K-1M context windows.
    * Ollama models work best at 28K-32K (even if they technically support more).
    */
-  const PROVIDER_TOKEN_DEFAULTS: Record<string, {
+  const PROVIDER_TOKEN_DEFAULTS: Record<ProviderType, {
     mainAgentContext: number
     temporalBudget: number
     compactionThreshold: number
@@ -75,17 +81,32 @@ export namespace Config {
   }
 
   /**
+   * Validate and normalize the provider string.
+   * Throws with an actionable error for unknown providers.
+   */
+  function validateProvider(provider: string): ProviderType {
+    if (SUPPORTED_PROVIDERS.includes(provider as ProviderType)) {
+      return provider as ProviderType
+    }
+    throw new Error(
+      `Unknown AGENT_PROVIDER: "${provider}". ` +
+        `Supported providers: ${SUPPORTED_PROVIDERS.join(', ')}. ` +
+        `Set AGENT_PROVIDER=ollama for local Ollama, or omit for Anthropic (default).`,
+    )
+  }
+
+  /**
    * Get the default models for a provider.
    */
-  function getModelDefaults(provider: string): Record<ModelTier, string> {
-    return PROVIDER_MODEL_DEFAULTS[provider] ?? PROVIDER_MODEL_DEFAULTS.anthropic
+  function getModelDefaults(provider: ProviderType): Record<ModelTier, string> {
+    return PROVIDER_MODEL_DEFAULTS[provider]
   }
 
   /**
    * Get the default token budgets for a provider.
    */
-  function getTokenDefaults(provider: string) {
-    return PROVIDER_TOKEN_DEFAULTS[provider] ?? PROVIDER_TOKEN_DEFAULTS.anthropic
+  function getTokenDefaults(provider: ProviderType) {
+    return PROVIDER_TOKEN_DEFAULTS[provider]
   }
 
   export const Schema = z.object({
@@ -126,7 +147,7 @@ export namespace Config {
    * Resolved config with all defaults applied based on provider.
    */
   export interface Config {
-    provider: string
+    provider: ProviderType
     ollamaBaseUrl: string
     models: Record<ModelTier, string>
     db: string
@@ -148,6 +169,7 @@ export namespace Config {
   /**
    * Get the current configuration.
    * Loads from environment variables with provider-aware defaults.
+   * Throws on invalid provider or broken token budget invariants.
    */
   export function get(): Config {
     if (cached) return cached
@@ -164,12 +186,44 @@ export namespace Config {
       tokenBudgets: {},
     })
 
+    // Validate provider — throws with actionable error for unknown values
+    const provider = validateProvider(raw.provider)
+
     // Resolve defaults based on provider
-    const modelDefaults = getModelDefaults(raw.provider)
-    const tokenDefaults = getTokenDefaults(raw.provider)
+    const modelDefaults = getModelDefaults(provider)
+    const tokenDefaults = getTokenDefaults(provider)
+
+    const resolvedBudgets = {
+      mainAgentContext: raw.tokenBudgets.mainAgentContext ?? tokenDefaults.mainAgentContext,
+      temporalBudget: raw.tokenBudgets.temporalBudget ?? tokenDefaults.temporalBudget,
+      compactionThreshold: raw.tokenBudgets.compactionThreshold ?? tokenDefaults.compactionThreshold,
+      compactionTarget: raw.tokenBudgets.compactionTarget ?? tokenDefaults.compactionTarget,
+      compactionHardLimit: raw.tokenBudgets.compactionHardLimit ?? tokenDefaults.compactionHardLimit,
+      recencyBufferMessages: raw.tokenBudgets.recencyBufferMessages ?? tokenDefaults.recencyBufferMessages,
+      temporalQueryBudget: raw.tokenBudgets.temporalQueryBudget ?? tokenDefaults.temporalQueryBudget,
+      ltmReflectBudget: raw.tokenBudgets.ltmReflectBudget ?? tokenDefaults.ltmReflectBudget,
+      ltmConsolidateBudget: raw.tokenBudgets.ltmConsolidateBudget ?? tokenDefaults.ltmConsolidateBudget,
+    }
+
+    // Validate token budget invariants to prevent infinite compaction loops
+    // (Risk #8 from QA risk register)
+    if (resolvedBudgets.compactionThreshold <= resolvedBudgets.compactionTarget) {
+      throw new Error(
+        `Invalid token budget: compactionThreshold (${resolvedBudgets.compactionThreshold}) ` +
+          `must be greater than compactionTarget (${resolvedBudgets.compactionTarget}). ` +
+          `This would cause an infinite compaction loop.`,
+      )
+    }
+    if (resolvedBudgets.mainAgentContext <= resolvedBudgets.compactionThreshold) {
+      throw new Error(
+        `Invalid token budget: mainAgentContext (${resolvedBudgets.mainAgentContext}) ` +
+          `must be greater than compactionThreshold (${resolvedBudgets.compactionThreshold}). ` +
+          `The agent would trigger compaction on every turn.`,
+      )
+    }
 
     cached = {
-      provider: raw.provider,
+      provider,
       ollamaBaseUrl: raw.ollamaBaseUrl,
       models: {
         reasoning: raw.models.reasoning ?? modelDefaults.reasoning,
@@ -177,17 +231,7 @@ export namespace Config {
         fast: raw.models.fast ?? modelDefaults.fast,
       },
       db: raw.db,
-      tokenBudgets: {
-        mainAgentContext: raw.tokenBudgets.mainAgentContext ?? tokenDefaults.mainAgentContext,
-        temporalBudget: raw.tokenBudgets.temporalBudget ?? tokenDefaults.temporalBudget,
-        compactionThreshold: raw.tokenBudgets.compactionThreshold ?? tokenDefaults.compactionThreshold,
-        compactionTarget: raw.tokenBudgets.compactionTarget ?? tokenDefaults.compactionTarget,
-        compactionHardLimit: raw.tokenBudgets.compactionHardLimit ?? tokenDefaults.compactionHardLimit,
-        recencyBufferMessages: raw.tokenBudgets.recencyBufferMessages ?? tokenDefaults.recencyBufferMessages,
-        temporalQueryBudget: raw.tokenBudgets.temporalQueryBudget ?? tokenDefaults.temporalQueryBudget,
-        ltmReflectBudget: raw.tokenBudgets.ltmReflectBudget ?? tokenDefaults.ltmReflectBudget,
-        ltmConsolidateBudget: raw.tokenBudgets.ltmConsolidateBudget ?? tokenDefaults.ltmConsolidateBudget,
-      },
+      tokenBudgets: resolvedBudgets,
     }
 
     return cached
