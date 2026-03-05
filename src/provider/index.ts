@@ -1,11 +1,17 @@
 /**
  * AI Provider integration for nuum
  *
- * Phase 1: Anthropic-only via @ai-sdk/anthropic
- * Simplified from OpenCode's multi-provider system.
+ * Supports multiple providers:
+ * - Anthropic (default): via @ai-sdk/anthropic
+ * - Ollama: via @ai-sdk/openai (OpenAI-compatible endpoint)
+ *
+ * Provider is selected via AGENT_PROVIDER env var.
+ * When unset or 'anthropic', uses Anthropic (backward compatible).
+ * When 'ollama', uses Ollama's OpenAI-compatible API.
  */
 
 import {createAnthropic} from '@ai-sdk/anthropic'
+import {createOpenAI} from '@ai-sdk/openai'
 import {
   generateText,
   streamText,
@@ -28,6 +34,15 @@ export namespace Provider {
   const log = Log.create({service: 'provider'})
 
   /**
+   * Check if the current provider is Anthropic.
+   * Used to conditionalize Anthropic-specific features (caching, beta headers).
+   */
+  export function isAnthropic(): boolean {
+    const config = Config.get()
+    return config.provider === 'anthropic'
+  }
+
+  /**
    * Get an Anthropic API key from environment.
    * Throws if not found.
    */
@@ -45,7 +60,7 @@ export namespace Provider {
   /**
    * Create an Anthropic provider instance.
    */
-  function createProvider() {
+  function createAnthropicProvider() {
     return createAnthropic({
       apiKey: getApiKey(),
       headers: {
@@ -60,11 +75,42 @@ export namespace Provider {
   }
 
   /**
+   * Create an Ollama provider instance via OpenAI-compatible API.
+   *
+   * Ollama exposes an OpenAI-compatible endpoint at /v1.
+   * We use @ai-sdk/openai to talk to it.
+   */
+  function createOllamaProvider() {
+    const baseURL =
+      process.env.OLLAMA_BASE_URL || 'http://localhost:11434/v1'
+
+    log.info('creating Ollama provider', {baseURL})
+
+    return createOpenAI({
+      baseURL,
+      apiKey: 'ollama', // Ollama doesn't require a real API key
+    })
+  }
+
+  /**
+   * Create the appropriate provider based on configuration.
+   */
+  function createProvider() {
+    const config = Config.get()
+
+    if (config.provider === 'ollama') {
+      return createOllamaProvider()
+    }
+
+    return createAnthropicProvider()
+  }
+
+  /**
    * Get a language model for a given model ID.
    */
   export function getModel(modelId: string): LanguageModel {
-    const anthropic = createProvider()
-    return anthropic(modelId)
+    const provider = createProvider()
+    return provider(modelId)
   }
 
   /**
@@ -184,9 +230,12 @@ Please check the tool's parameter schema and try again with correct arguments.`
   /**
    * Prepare messages with optional system prompt caching.
    *
-   * When cacheSystemPrompt is true, converts the system string to a system message
-   * with Anthropic cache control. This enables prompt caching for the (typically large
-   * and stable) system prompt.
+   * When cacheSystemPrompt is true AND the provider is Anthropic, converts the
+   * system string to a system message with Anthropic cache control. This enables
+   * prompt caching for the (typically large and stable) system prompt.
+   *
+   * For non-Anthropic providers, caching is a no-op — the system prompt is
+   * passed through as a standard system parameter.
    */
   function prepareMessages(
     messages: CoreMessage[],
@@ -197,7 +246,8 @@ Please check the tool's parameter schema and try again with correct arguments.`
       return {messages, system: undefined}
     }
 
-    if (!cacheSystemPrompt) {
+    // Only apply Anthropic-specific caching when using Anthropic provider
+    if (!cacheSystemPrompt || !isAnthropic()) {
       // No caching - use the standard system parameter
       return {messages, system}
     }
@@ -289,6 +339,7 @@ Please check the tool's parameter schema and try again with correct arguments.`
       messageCount: messages.length,
       hasTools: !!options.tools,
       cacheSystemPrompt: options.cacheSystemPrompt ?? false,
+      provider: Config.get().provider,
     })
 
     return generateText({
@@ -320,6 +371,7 @@ Please check the tool's parameter schema and try again with correct arguments.`
       messageCount: messages.length,
       hasTools: !!options.tools,
       cacheSystemPrompt: options.cacheSystemPrompt ?? false,
+      provider: Config.get().provider,
     })
 
     return streamText({

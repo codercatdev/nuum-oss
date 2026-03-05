@@ -12,6 +12,9 @@
  * - Message history management
  * - Token usage tracking
  * - Completion detection
+ *
+ * Provider-aware: Anthropic-specific features (cache markers, cache metrics)
+ * are only applied when using the Anthropic provider.
  */
 
 import type {
@@ -32,12 +35,13 @@ const log = Log.create({service: 'agent-loop'})
 /**
  * Maximum output tokens by model.
  *
- * The Anthropic API accepts maxTokens up to the model's output limit.
+ * The API accepts maxTokens up to the model's output limit.
  * We use the model's full capacity — maxTokens is a ceiling, not a target.
  * The model naturally stops when done; this just prevents artificial truncation
  * that causes incomplete tool calls (e.g., write calls missing content).
  */
 const MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
+  // === Anthropic Claude models ===
   // Opus 4.6 - 128K output
   'claude-opus-4-6': 128_000,
   'claude-opus-4-6-20250918': 128_000,
@@ -50,6 +54,31 @@ const MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
   // Older models
   'claude-3-5-sonnet-20241022': 8_192,
   'claude-3-5-haiku-20241022': 8_192,
+
+  // === Ollama / Local models ===
+  // Qwen 2.5 family
+  'qwen2.5:72b': 8_192,
+  'qwen2.5:32b': 8_192,
+  'qwen2.5:14b': 8_192,
+  'qwen2.5:7b': 4_096,
+  'qwen2.5:3b': 4_096,
+  'qwen2.5-coder:32b': 8_192,
+  'qwen2.5-coder:14b': 8_192,
+  'qwen2.5-coder:7b': 4_096,
+  // Llama 3.1/3.2 family
+  'llama3.1:70b': 4_096,
+  'llama3.1:8b': 4_096,
+  'llama3.2:3b': 4_096,
+  'llama3.2:1b': 2_048,
+  // DeepSeek
+  'deepseek-r1:32b': 8_192,
+  'deepseek-r1:14b': 8_192,
+  'deepseek-r1:7b': 4_096,
+  // Mistral
+  'mistral:7b': 4_096,
+  'mistral-small:latest': 8_192,
+  // Codestral
+  'codestral:latest': 8_192,
 }
 
 /** Default for unknown models — generous but safe */
@@ -65,6 +94,10 @@ export function getMaxOutputTokens(modelId: string): number {
 /**
  * Add Anthropic cache control markers to messages.
  *
+ * Only applied when using the Anthropic provider.
+ * Sending providerOptions.anthropic to non-Anthropic providers could cause
+ * errors or silent failures.
+ *
  * Follows OpenCode's caching strategy:
  * - Mark the last 3 messages with cache control
  * - Combined with system prompt caching in the provider layer
@@ -78,6 +111,11 @@ export function getMaxOutputTokens(modelId: string): number {
  */
 function addCacheMarkers(messages: CoreMessage[]): CoreMessage[] {
   if (messages.length === 0) return messages
+
+  // Only apply cache markers for Anthropic provider
+  if (!Provider.isAnthropic()) {
+    return messages
+  }
 
   // Create a copy to avoid mutating the original
   const result = [...messages]
@@ -276,9 +314,7 @@ export async function runAgentLoop(
       onThinking?.()
     }
 
-    // Add cache markers for Anthropic prompt caching
-    // Mark the second-to-last message as a cache breakpoint
-    // Combined with system prompt caching, this caches the stable context
+    // Add cache markers for Anthropic prompt caching (no-op for other providers)
     const messagesWithCache = addCacheMarkers(messages)
 
     const response = await Provider.generate({
@@ -294,31 +330,39 @@ export async function runAgentLoop(
     totalInputTokens += response.usage.promptTokens
     totalOutputTokens += response.usage.completionTokens
 
-    // Log cache metrics for observability
+    // Log cache metrics for observability (Anthropic-specific)
     // Note: Anthropic's input_tokens (promptTokens) only counts tokens AFTER the last
     // cache breakpoint. It does NOT include cached tokens. So:
     //   total = cacheRead + cacheWrite + promptTokens
-    const anthropicMeta = response.providerMetadata?.anthropic as
-      | {
-          cacheCreationInputTokens?: number
-          cacheReadInputTokens?: number
-        }
-      | undefined
+    if (Provider.isAnthropic()) {
+      const anthropicMeta = response.providerMetadata?.anthropic as
+        | {
+            cacheCreationInputTokens?: number
+            cacheReadInputTokens?: number
+          }
+        | undefined
 
-    if (anthropicMeta) {
-      const cacheWrite = anthropicMeta.cacheCreationInputTokens ?? 0
-      const cacheRead = anthropicMeta.cacheReadInputTokens ?? 0
-      const uncached = response.usage.promptTokens // This IS the uncached tokens
-      const total = cacheRead + cacheWrite + uncached
+      if (anthropicMeta) {
+        const cacheWrite = anthropicMeta.cacheCreationInputTokens ?? 0
+        const cacheRead = anthropicMeta.cacheReadInputTokens ?? 0
+        const uncached = response.usage.promptTokens // This IS the uncached tokens
+        const total = cacheRead + cacheWrite + uncached
 
+        log.info('token usage', {
+          input: total,
+          output: response.usage.completionTokens,
+          cacheWrite,
+          cacheRead,
+          uncached,
+          cacheHitRate:
+            total > 0 ? `${Math.round((cacheRead / total) * 100)}%` : '0%',
+        })
+      }
+    } else {
+      // Generic token usage logging for non-Anthropic providers
       log.info('token usage', {
-        input: total,
+        input: response.usage.promptTokens,
         output: response.usage.completionTokens,
-        cacheWrite,
-        cacheRead,
-        uncached,
-        cacheHitRate:
-          total > 0 ? `${Math.round((cacheRead / total) * 100)}%` : '0%',
       })
     }
 
