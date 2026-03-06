@@ -16,6 +16,8 @@ import {VERSION_STRING} from '../version'
 import {Log} from '../util/log'
 import {printError, printSimpleError} from './error'
 import {renderRaw} from './renderer'
+import {startServer} from '../local-agent/server'
+import {DEFAULT_RUNNER_CONFIG} from '../local-agent/types'
 
 interface CliOptions {
   prompt: string | undefined
@@ -29,6 +31,8 @@ interface CliOptions {
   compact: boolean
   stdio: boolean
   repl: boolean
+  serve: boolean
+  port: number
 }
 
 function parseCliArgs(): CliOptions {
@@ -45,6 +49,8 @@ function parseCliArgs(): CliOptions {
       compact: {type: 'boolean', default: false},
       stdio: {type: 'boolean', default: false},
       repl: {type: 'boolean', default: false},
+      serve: {type: 'boolean', default: false},
+      port: {type: 'string', default: '3001'},
     },
     allowPositionals: false,
   })
@@ -61,6 +67,8 @@ function parseCliArgs(): CliOptions {
     compact: values.compact ?? false,
     stdio: values.stdio ?? false,
     repl: values.repl ?? false,
+    serve: values.serve ?? false,
+    port: parseInt(values.port as string ?? '3001', 10),
   }
 }
 
@@ -75,6 +83,7 @@ Usage:
   nuum -p "prompt" --verbose Show debug output
   nuum --repl                Start interactive REPL mode
   nuum --stdio               Start protocol server over stdin/stdout
+  nuum --serve               Start local agent HTTP server (Chorus-compatible)
   nuum --inspect             Show memory stats (no LLM call)
   nuum --dump                Show raw system prompt (no LLM call)
   nuum --compact             Force run compaction (distillation)
@@ -85,6 +94,8 @@ Options:
   -v, --verbose         Show memory state, token usage, and execution trace
       --repl            Start interactive REPL with readline support
       --stdio           Start Claude Code SDK protocol server on stdin/stdout
+      --serve           Start local agent HTTP server for miriad-redux
+      --port <number>   Port for --serve (default: 3001)
       --inspect         Show memory statistics: temporal, present, LTM
       --dump            Dump the full system prompt that would be sent to LLM
       --compact         Force run compaction to reduce effective view size
@@ -115,7 +126,9 @@ JSON-RPC Mode (--stdio):
   Methods: run, cancel, status
 
 Environment:
-  ANTHROPIC_API_KEY       Required. Anthropic API key.
+  AGENT_PROVIDER          Provider: 'anthropic' (default) or 'ollama'
+  ANTHROPIC_API_KEY       Required for Anthropic provider.
+  OLLAMA_BASE_URL         Ollama server URL (default: http://localhost:11434)
   BRAVE_SEARCH_API_KEY    Optional. Enables Brave Search (recommended).
                           Without it, web search falls back to DuckDuckGo.
                           Free key: https://brave.com/search/api/
@@ -129,6 +142,8 @@ Examples:
   nuum --inspect --db ./my-agent.db
   nuum --dump
   nuum --stdio --db ./agent.db
+  nuum --serve               Start local agent server on port 3001
+  nuum --serve --port 8080   Start on custom port
 `)
 }
 
@@ -155,6 +170,32 @@ async function main(): Promise<void> {
     try {
       await runRepl({dbPath: options.db})
       // runRepl keeps running until user quits
+    } catch (error) {
+      printError(error, {verbose: options.verbose})
+      process.exit(1)
+    }
+    return
+  }
+
+  // Handle --serve (local agent HTTP server)
+  if (options.serve) {
+    try {
+      const config = {
+        ...DEFAULT_RUNNER_CONFIG,
+        port: options.port,
+      }
+      const handle = startServer(config)
+      // Keep process alive until interrupted
+      process.on('SIGINT', () => {
+        handle.stop()
+        process.exit(0)
+      })
+      process.on('SIGTERM', () => {
+        handle.stop()
+        process.exit(0)
+      })
+      // Block forever (server runs in background)
+      await new Promise(() => {})
     } catch (error) {
       printError(error, {verbose: options.verbose})
       process.exit(1)
