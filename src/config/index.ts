@@ -46,6 +46,7 @@ export namespace Config {
    * Ollama models work best at 28K-32K (even if they technically support more).
    */
   const PROVIDER_TOKEN_DEFAULTS: Record<ProviderType, {
+    fixedOverheadTokens: number
     mainAgentContext: number
     temporalBudget: number
     compactionThreshold: number
@@ -57,6 +58,7 @@ export namespace Config {
     ltmConsolidateBudget: number
   }> = {
     anthropic: {
+      fixedOverheadTokens: 40_000,
       mainAgentContext: 180_000,
       temporalBudget: 64_000,
       compactionThreshold: 80_000,
@@ -68,6 +70,7 @@ export namespace Config {
       ltmConsolidateBudget: 512_000,
     },
     ollama: {
+      fixedOverheadTokens: 4_000,
       mainAgentContext: 28_000,
       temporalBudget: 12_000,
       compactionThreshold: 16_000,
@@ -122,6 +125,8 @@ export namespace Config {
     }),
     db: z.string().default('./agent.db'),
     tokenBudgets: z.object({
+      /** Fixed overhead for system prompt, tools, formatting */
+      fixedOverheadTokens: z.number().optional(),
       /** Main agent context limit */
       mainAgentContext: z.number().optional(),
       /** Max tokens for temporal view in prompt */
@@ -152,6 +157,7 @@ export namespace Config {
     models: Record<ModelTier, string>
     db: string
     tokenBudgets: {
+      fixedOverheadTokens: number
       mainAgentContext: number
       temporalBudget: number
       compactionThreshold: number
@@ -194,6 +200,7 @@ export namespace Config {
     const tokenDefaults = getTokenDefaults(provider)
 
     const resolvedBudgets = {
+      fixedOverheadTokens: raw.tokenBudgets.fixedOverheadTokens ?? tokenDefaults.fixedOverheadTokens,
       mainAgentContext: raw.tokenBudgets.mainAgentContext ?? tokenDefaults.mainAgentContext,
       temporalBudget: raw.tokenBudgets.temporalBudget ?? tokenDefaults.temporalBudget,
       compactionThreshold: raw.tokenBudgets.compactionThreshold ?? tokenDefaults.compactionThreshold,
@@ -219,6 +226,13 @@ export namespace Config {
         `Invalid token budget: mainAgentContext (${resolvedBudgets.mainAgentContext}) ` +
           `must be greater than compactionThreshold (${resolvedBudgets.compactionThreshold}). ` +
           `The agent would trigger compaction on every turn.`,
+      )
+    }
+    if (resolvedBudgets.fixedOverheadTokens >= resolvedBudgets.compactionHardLimit) {
+      throw new Error(
+        `Invalid token budget: fixedOverheadTokens (${resolvedBudgets.fixedOverheadTokens}) ` +
+          `must be less than compactionHardLimit (${resolvedBudgets.compactionHardLimit}). ` +
+          `The agent would fail the context overflow check on every turn.`,
       )
     }
 
