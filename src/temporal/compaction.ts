@@ -8,6 +8,7 @@
 
 import type {TemporalStorage} from '../storage'
 import type {WorkerStorage} from '../storage'
+import {Config} from '../config'
 import {buildTemporalView} from './view'
 
 export interface CompactionConfig {
@@ -59,7 +60,25 @@ export async function shouldTriggerCompaction(
  * Without this, the estimate undercounts actual API tokens by ~40-50%,
  * causing compaction to trigger too late (e.g., estimate 103k = actual 160k).
  */
+/**
+ * @deprecated Anthropic default, kept for backward compatibility with tests.
+ * Use getFixedOverheadTokens() for provider-aware value.
+ */
 export const FIXED_OVERHEAD_TOKENS = 40_000
+
+/**
+ * Get the fixed overhead tokens for the current provider.
+ * Uses provider-aware value from config, falling back to the
+ * Anthropic default (40K) if config is not yet initialized.
+ */
+export function getFixedOverheadTokens(): number {
+  try {
+    return Config.get().tokenBudgets.fixedOverheadTokens
+  } catch {
+    // Config not initialized (e.g., in tests) — use Anthropic default
+    return FIXED_OVERHEAD_TOKENS
+  }
+}
 
 /**
  * Get the token count of the effective view (what actually goes to the agent).
@@ -71,7 +90,7 @@ export async function getEffectiveViewTokens(
   const messages = await temporal.getMessages()
   const summaries = await temporal.getSummaries()
   const view = buildTemporalView({budget: 0, messages, summaries})
-  return view.totalTokens + FIXED_OVERHEAD_TOKENS
+  return view.totalTokens + getFixedOverheadTokens()
 }
 
 /**
